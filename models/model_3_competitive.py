@@ -1,16 +1,44 @@
-# models/model_3_competitive.py
-from utils.helpers import haversine_distance
-
-def adjust_price_for_competition(own_price, own_loc, competitors):
-    min_dist = float("inf")
-    min_price = own_price
-    for comp in competitors:
-        dist = haversine_distance(own_loc, comp['location'])
-        if dist < 0.5 and comp['price'] < min_price:
-            min_price = comp['price']
-            min_dist = dist
-    if own_price > min_price:
-        return own_price - 0.5  # Adjust down if overpriced
-    elif own_price < min_price:
-        return own_price + 0.5  # Adjust up if underpriced
-    return own_price
+def competitive_price(parking_lot_id, current_price, occupancy, capacity, competitor_prices):
+    """
+    Competitive pricing model that considers nearby parking lots
+    
+    Args:
+        parking_lot_id (str): ID of the parking lot
+        current_price (float): Current price
+        occupancy (int): Current occupancy
+        capacity (int): Total capacity
+        competitor_prices (list): List of competitor prices
+        
+    Returns:
+        float: New price
+    """
+    from config import MIN_PRICE, MAX_PRICE
+    
+    utilization = occupancy / max(1, capacity)
+    
+    if not competitor_prices:
+        return current_price
+    
+    # Calculate competitor metrics
+    avg_competitor_price = sum(competitor_prices) / len(competitor_prices)
+    min_competitor_price = min(competitor_prices)
+    max_competitor_price = max(competitor_prices)
+    
+    # Pricing strategy based on utilization and competition
+    if utilization >= 0.95:  # Nearly full
+        # Lower price if competitors are cheaper
+        if current_price > min_competitor_price:
+            return max(MIN_PRICE, min_competitor_price * 0.95)
+    
+    elif utilization <= 0.5:  # Underutilized
+        # Increase price if competitors are charging more
+        if current_price < max_competitor_price:
+            return min(MAX_PRICE, max_competitor_price * 1.05)
+    
+    # Maintain competitive positioning
+    if current_price > avg_competitor_price * 1.1:
+        return max(MIN_PRICE, avg_competitor_price * 0.95)
+    elif current_price < avg_competitor_price * 0.9:
+        return min(MAX_PRICE, avg_competitor_price * 1.05)
+    
+    return current_price
