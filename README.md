@@ -1,48 +1,23 @@
-# IIT-Guwhati-Capstone-Project---Data-Science
+# Dynamic Parking Pricing System
 
-# Dynamic Pricing for Urban Parking Lots 🚗📈
+This project implements a real-time dynamic pricing system for urban parking lots using Pathway for stream processing and Bokeh for visualization.
 
-This is the official repository for our Summer Analytics 2025 Capstone Project, hosted by the Consulting & Analytics Club × Pathway.
+## Features
+- Three pricing models:
+  1. Baseline linear model
+  2. Demand-based model
+  3. Competitive pricing model
+- Real-time data streaming simulation
+- Interactive dashboard for monitoring
+- Geospatial analysis of competitor lots
 
-## 🚀 Project Overview
+## Setup
+1. Install requirements: `pip install -r requirements.txt`
+2. Place dataset in `data/dataset.csv`
+3. Run `main_simulation.ipynb` in Jupyter or Google Colab
 
-Urban parking is a scarce resource, and static pricing leads to either underutilization or overcrowding. Our project proposes a real-time dynamic pricing engine for 14 urban parking lots, based on demand patterns, traffic, vehicle types, and competitor pricing.
-
-We simulate real-time pricing updates using only:
-- Python
-- Pandas
-- NumPy
-- Pathway (for real-time stream processing)
-- Bokeh (for real-time visualization)
-
-## 💡 Objective
-
-To create a pricing model that:
-- Starts at a base price of $10
-- Adjusts based on demand features like occupancy, queue, traffic, and special events
-- Incorporates geographic competition in advanced stages
-- Operates in a real-time data stream environment
-
-## 🧰 Tech Stack
-
-| Technology | Purpose                          |
-|------------|----------------------------------|
-| Python     | Core language                    |
-| Pandas     | Data processing                  |
-| NumPy      | Numerical operations             |
-| Pathway    | Real-time data streaming engine  |
-| Bokeh      | Real-time plotting and dashboard |
-
-## 📊 Models Implemented
-
-1. **Baseline Linear Model**
-2. **Demand-Based Model**
-3. **Competitive Pricing Model (Optional)**
-
-Each model is implemented from scratch under the `models/` folder.
-
-## 📈 Real-Time Workflow
-
-We use Pathway to simulate real-time data and pricing updates. All results are visualized live using Bokeh.
-
-## 📁 Folder Structure
+## Usage
+1. Use the dropdown to select pricing model
+2. Monitor real-time prices in the dashboard
+3. Click "Reset Prices" to reset to base price
+4. Click on legend items to show/hide parking lots
