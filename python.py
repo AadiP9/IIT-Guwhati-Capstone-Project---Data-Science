@@ -1,0 +1,405 @@
+# Install required libraries (ignore dependency conflicts)
+!pip install pathway bokeh panel scikit-learn --quiet
+
+# Create the necessary directory structure
+!mkdir -p models utils data
+
+# Create model files
+%%writefile models/model1_baseline.py
+def baseline_price(prev_price, occupancy, capacity):
+    """
+    Baseline linear pricing model
+    """
+    from config import ALPHA, MIN_PRICE, MAX_PRICE
+    
+    utilization = occupancy / max(1, capacity)
+    new_price = prev_price + ALPHA * utilization
+    return max(MIN_PRICE, min(MAX_PRICE, new_price))
+
+%%writefile models/model2_demand.py
+def demand_based_price(occupancy, capacity, queue_length, traffic, is_special, vehicle_weight):
+    """
+    Demand-based pricing model
+    """
+    from config import MODEL2_PARAMS, BASE_PRICE, MIN_PRICE, MAX_PRICE
+    
+    alpha = MODEL2_PARAMS['alpha']
+    beta = MODEL2_PARAMS['beta']
+    gamma = MODEL2_PARAMS['gamma']
+    delta = MODEL2_PARAMS['delta']
+    epsilon = MODEL2_PARAMS['epsilon']
+    lambda_ = MODEL2_PARAMS['lambda_']
+    
+    demand = (
+        alpha * (occupancy / max(1, capacity)) +
+        beta * queue_length -
+        gamma * traffic +
+        delta * float(is_special) +
+        epsilon * vehicle_weight
+    )
+    
+    demand_norm = max(0, min(1, demand / 10.0))
+    new_price = BASE_PRICE * (1 + lambda_ * demand_norm)
+    return max(MIN_PRICE, min(MAX_PRICE, new_price))
+
+%%writefile models/model3_competitive.py
+def competitive_price(parking_lot_id, current_price, occupancy, capacity, competitor_prices):
+    """
+    Competitive pricing model
+    """
+    from config import MIN_PRICE, MAX_PRICE
+    
+    utilization = occupancy / max(1, capacity)
+    
+    if not competitor_prices:
+        return current_price
+    
+    avg_competitor_price = sum(competitor_prices) / len(competitor_prices)
+    min_competitor_price = min(competitor_prices)
+    max_competitor_price = max(competitor_prices)
+    
+    if utilization >= 0.95:
+        if current_price > min_competitor_price:
+            return max(MIN_PRICE, min_competitor_price * 0.95)
+    
+    elif utilization <= 0.5:
+        if current_price < max_competitor_price:
+            return min(MAX_PRICE, max_competitor_price * 1.05)
+    
+    if current_price > avg_competitor_price * 1.1:
+        return max(MIN_PRICE, avg_competitor_price * 0.95)
+    elif current_price < avg_competitor_price * 0.9:
+        return min(MAX_PRICE, avg_competitor_price * 1.05)
+    
+    return current_price
+
+# Create utility files
+%%writefile utils/geospatial.py
+import numpy as np
+from sklearn.neighbors import BallTree
+
+def calculate_distances(lots_data):
+    coordinates = np.radians(lots_data[['Latitude', 'Longitude']].values)
+    tree = BallTree(coordinates, metric='haversine')
+    return tree.query(coordinates, return_distance=True)
+
+def get_nearby_lots(parking_lot_id, lot_info, distances, indices, max_distance_km):
+    max_distance_rad = max_distance_km / 6371.0
+    lot_ids = list(lot_info.keys())
+    
+    if parking_lot_id not in lot_ids:
+        return []
+    
+    idx = lot_ids.index(parking_lot_id)
+    mask = distances[idx] <= max_distance_rad
+    nearby_indices = indices[idx][mask]
+    return [lot_ids[i] for i in nearby_indices if lot_ids[i] != parking_lot_id]
+
+%%writefile utils/helpers.py
+import pandas as pd
+from config import VEHICLE_WEIGHTS
+
+def preprocess_data(df):
+    df['Timestamp'] = pd.to_datetime(
+        df['LastUpdatedDate'] + ' ' + df['LastUpdatedTime'],
+        format='%d-%m-%Y %H:%M:%S'
+    )
+    
+    column_mapping = {
+        'Occupancy': 'Occupancy',
+        'Capacity': 'Capacity',
+        'QueueLength': 'QueueLength',
+        'Traffic': 'Traffic',
+        'IsSpecialDay': 'IsSpecialDay',
+        'VehicleType': 'VehicleType',
+        'Latitude': 'Latitude',
+        'Longitude': 'Longitude',
+        'ParkingLotID': 'ParkingLotID'
+    }
+    df = df.rename(columns=column_mapping)
+    
+    df['QueueLength'] = df['QueueLength'].fillna(0)
+    df['Traffic'] = df['Traffic'].fillna(1.0)
+    df['IsSpecialDay'] = df['IsSpecialDay'].fillna(0).astype(bool)
+    df['VehicleType'] = df['VehicleType'].fillna('car')
+    df['VehicleWeight'] = df['VehicleType'].map(VEHICLE_WEIGHTS).fillna(1.0)
+    
+    return df.sort_values('Timestamp').reset_index(drop=True)
+
+def create_lot_info(df):
+    lot_info = {}
+    for lot_id, group in df.groupby('ParkingLotID'):
+        lot_info[lot_id] = {
+            'latitude': group['Latitude'].iloc[0],
+            'longitude': group['Longitude'].iloc[0]
+        }
+    return lot_info
+
+# Create config file
+%%writefile config.py
+# Configuration
+BASE_PRICE = 10.0
+MIN_PRICE = 5.0
+MAX_PRICE = 20.0
+
+# Model 1 parameters
+ALPHA = 0.1
+
+# Model 2 parameters
+MODEL2_PARAMS = {
+    'alpha': 0.6,
+    'beta': 0.3,
+    'gamma': 0.2,
+    'delta': 0.4,
+    'epsilon': 0.1,
+    'lambda_': 0.2
+}
+
+# Model 3 parameters
+NEARBY_LOTS_K = 3
+MAX_DISTANCE_KM = 2.0
+
+# Vehicle type weights
+VEHICLE_WEIGHTS = {
+    'car': 1.0,
+    'bike': 0.8,
+    'truck': 1.2
+}
+
+# Now run the main simulation
+import numpy as np
+import pandas as pd
+import pathway as pw
+from datetime import datetime, timedelta
+import bokeh.plotting
+import panel as pn
+import time
+import threading
+from bokeh.models import ColumnDataSource, HoverTool
+from bokeh.palettes import Category20
+
+# Import custom modules
+from models.model1_baseline import baseline_price
+from models.model2_demand import demand_based_price
+from models.model3_competitive import competitive_price
+from utils.helpers import preprocess_data, create_lot_info
+from utils.geospatial import calculate_distances, get_nearby_lots
+from config import *
+
+# Load and preprocess data
+df = pd.read_csv('/content/Modified - modified.csv')
+df = preprocess_data(df)
+
+# Create lot information
+lot_info = create_lot_info(df)
+
+# Precompute distances
+unique_lots = df[['ParkingLotID', 'Latitude', 'Longitude']].drop_duplicates()
+distances, indices = calculate_distances(unique_lots)
+
+# Save preprocessed data for streaming
+df.to_csv('data/parking_stream.csv', index=False)
+
+# Pathway schema
+class ParkingSchema(pw.Schema):
+    Timestamp: str
+    ParkingLotID: str
+    Occupancy: int
+    Capacity: int
+    QueueLength: int
+    Traffic: float
+    IsSpecialDay: bool
+    VehicleWeight: float
+    Latitude: float
+    Longitude: float
+
+# Load data stream
+data = pw.demo.replay_csv(
+    'data/parking_stream.csv', 
+    schema=ParkingSchema, 
+    input_rate=1000
+)
+
+# Parse timestamps
+fmt = "%Y-%m-%d %H:%M:%S"
+data_with_time = data.with_columns(
+    t = data.Timestamp.dt.strptime(fmt),
+    parking_lot_id = pw.this.ParkingLotID
+)
+
+# Stateful processing
+class PricingState(pw.Schema):
+    parking_lot_id: str
+    last_price: float = BASE_PRICE
+    model: int = 2  # Default to demand-based model
+
+def update_prices(key, state, new):
+    current_price = state.last_price
+    model = state.model
+    
+    # Extract data
+    occupancy = new.Occupancy
+    capacity = new.Capacity
+    queue_length = new.QueueLength
+    traffic = new.Traffic
+    is_special = new.IsSpecialDay
+    vehicle_weight = new.VehicleWeight
+    lot_id = new.ParkingLotID
+    
+    # Apply pricing model
+    if model == 1:
+        new_price = baseline_price(current_price, occupancy, capacity)
+    elif model == 2:
+        new_price = demand_based_price(
+            occupancy, capacity, queue_length, traffic, 
+            is_special, vehicle_weight
+        )
+    else:
+        # Get competitor prices (simplified - in real system we'd get current prices)
+        nearby_lots = get_nearby_lots(
+            lot_id, lot_info, distances, indices, MAX_DISTANCE_KM
+        )
+        competitor_prices = [BASE_PRICE] * len(nearby_lots)
+        new_price = competitive_price(
+            lot_id, current_price, occupancy, capacity, competitor_prices
+        )
+    
+    # Update state
+    state.last_price = new_price
+    return state
+
+# Create stateful processing
+stateful = pw.stateful.reduce(
+    update_prices,
+    data_with_time,
+    instance=pw.this.parking_lot_id,
+    schema=PricingState
+)
+
+# Join price to data stream
+data_with_price = data_with_time.join(
+    stateful, 
+    pw.left.parking_lot_id == pw.right.parking_lot_id
+).select(
+    *pw.left,
+    price = pw.right.last_price,
+    model = pw.right.model
+)
+
+# Visualization setup
+pn.extension()
+source = ColumnDataSource(data={
+    't': [], 'parking_lot_id': [], 'price': [],
+    'occupancy': [], 'capacity': [], 'utilization': []
+})
+
+plot = bokeh.plotting.figure(
+    height=400, width=800, title="Real-Time Parking Prices",
+    x_axis_type="datetime", tools="pan,box_zoom,reset,save"
+)
+plot.xaxis.axis_label = "Time"
+plot.yaxis.axis_label = "Price ($)"
+
+# Color mapping
+unique_lot_ids = df['ParkingLotID'].unique()
+colors = Category20[20]
+color_map = {lot_id: colors[i % 20] for i, lot_id in enumerate(unique_lot_ids)}
+
+# Add lines
+for lot_id in unique_lot_ids:
+    plot.line(
+        't', 'price', source=source, line_width=2,
+        color=color_map[lot_id], legend_label=f"Lot {lot_id}",
+        muted_alpha=0.1
+    )
+
+# Hover tool
+hover = HoverTool(
+    tooltips=[
+        ("Lot", "@parking_lot_id"),
+        ("Time", "@t{%F %T}"),
+        ("Price", "@price{$0.00}"),
+        ("Occupancy", "@occupancy/@capacity"),
+        ("Utilization", "@utilization{0.0%}")
+    ],
+    formatters={'@t': 'datetime'}
+)
+plot.add_tools(hover)
+plot.legend.location = "top_left"
+plot.legend.click_policy = "mute"
+
+# Dashboard
+model_select = pn.widgets.Select(
+    name="Pricing Model", 
+    options={
+        "1: Baseline": 1,
+        "2: Demand-Based": 2,
+        "3: Competitive": 3
+    }, 
+    value=2
+)
+
+reset_btn = pn.widgets.Button(name="Reset Prices", button_type="primary")
+
+dashboard = pn.Column(
+    pn.Row(model_select, reset_btn),
+    plot
+)
+
+# Callbacks
+def update_model(event):
+    new_model = event.new
+    # Update model for all lots
+    for key in stateful.keys():
+        state = stateful.get(key)
+        state.model = new_model
+        stateful.set(key, state)
+
+def reset_prices(event):
+    # Reset all prices to base price
+    for key in stateful.keys():
+        state = stateful.get(key)
+        state.last_price = BASE_PRICE
+        stateful.set(key, state)
+
+model_select.param.watch(update_model, 'value')
+reset_btn.on_click(reset_prices)
+
+# Visualization update function
+def update_visualization():
+    # Create a query to get the latest prices
+    latest = data_with_price.select(
+        t=pw.this.t,
+        parking_lot_id=pw.this.ParkingLotID,
+        price=pw.this.price,
+        occupancy=pw.this.Occupancy,
+        capacity=pw.this.Capacity
+    ).with_columns(
+        utilization=pw.this.Occupancy / pw.this.Capacity
+    )
+    
+    # Convert to pandas for visualization
+    df_vis = pw.debug.table_to_pandas(latest)
+    
+    # Update the plot if we have new data
+    if not df_vis.empty:
+        source.stream(df_vis, rollover=10000)
+
+# Run pipeline in a separate thread
+def run_pipeline():
+    pw.run(monitoring_level=pw.MonitoringLevel.NONE)
+
+pw_thread = threading.Thread(target=run_pipeline, daemon=True)
+pw_thread.start()
+
+# Periodic updates for visualization
+def update_periodically():
+    while True:
+        update_visualization()
+        time.sleep(0.5)
+
+update_thread = threading.Thread(target=update_periodically, daemon=True)
+update_thread.start()
+
+# Display dashboard
+dashboard.servable()
